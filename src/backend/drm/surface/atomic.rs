@@ -352,6 +352,7 @@ impl AtomicDrmSurface {
                     damage_clips: None,
                     fb: test_buffer.fb,
                     fence: None,
+                    hotspot: None,
                 }),
             };
 
@@ -411,6 +412,7 @@ impl AtomicDrmSurface {
                 damage_clips: None,
                 fb: test_buffer.fb,
                 fence: None,
+                hotspot: None,
             }),
         };
 
@@ -471,6 +473,7 @@ impl AtomicDrmSurface {
                 damage_clips: None,
                 fb: test_buffer.fb,
                 fence: None,
+                hotspot: None,
             }),
         };
         let req = AtomicRequest::build_request(
@@ -525,6 +528,7 @@ impl AtomicDrmSurface {
                 damage_clips: None,
                 fb: test_buffer.fb,
                 fence: None,
+                hotspot: None,
             }),
         };
         let req = AtomicRequest::build_request(
@@ -647,6 +651,7 @@ impl AtomicDrmSurface {
                 damage_clips: None,
                 fb: test_buffer.fb,
                 fence: None,
+                hotspot: None,
             }),
         };
 
@@ -1233,6 +1238,19 @@ impl<'a> AtomicRequest<'a> {
             plane_props.insert("CRTC_Y", property::Value::SignedRange(config.dst.loc.y as i64));
             plane_props.insert("CRTC_W", property::Value::UnsignedRange(config.dst.size.w as u64));
             plane_props.insert("CRTC_H", property::Value::UnsignedRange(config.dst.size.h as u64));
+
+            // Para-virtualized cursor planes (virtio-gpu, qxl, vmwgfx) expose HOTSPOT_X/Y (only
+            // once DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT is set). Setting them lets the host align our
+            // cursor plane to its pointer and stop drawing a second host cursor. Guarded on the
+            // property existing, so ordinary planes/drivers are unaffected.
+            if let Some(hotspot) = config.hotspot {
+                if self.mapping.plane_prop_handle(handle, "HOTSPOT_X").is_ok() {
+                    plane_props.insert("HOTSPOT_X", property::Value::SignedRange(hotspot.x as i64));
+                }
+                if self.mapping.plane_prop_handle(handle, "HOTSPOT_Y").is_ok() {
+                    plane_props.insert("HOTSPOT_Y", property::Value::SignedRange(hotspot.y as i64));
+                }
+            }
 
             if self.mapping.plane_prop_handle(handle, "rotation").is_ok() {
                 plane_props.insert(

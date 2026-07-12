@@ -155,6 +155,11 @@ pub struct PlaneConfig<'a> {
     pub fb: framebuffer::Handle,
     /// Optional fence
     pub fence: Option<BorrowedFd<'a>>,
+    /// Cursor click point within the plane buffer, in physical pixels.
+    ///
+    /// `Some` only for a cursor plane on a para-virtualized driver; written to the plane's
+    /// `HOTSPOT_X`/`HOTSPOT_Y` properties so the host aligns the cursor plane to its pointer.
+    pub hotspot: Option<Point<i32, Physical>>,
 }
 
 /// VRR support state

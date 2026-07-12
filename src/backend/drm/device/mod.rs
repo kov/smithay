@@ -250,6 +250,14 @@ impl DrmDevice {
 
         Ok(
             if !force_legacy && fd.set_client_capability(ClientCapability::Atomic, true).is_ok() {
+                // Para-virtualized drivers (virtio-gpu, qxl, vmwgfx) only composite the client's
+                // cursor plane as the host pointer — and stop drawing their own pointer alongside
+                // it — when the client opts in to this cap and provides HOTSPOT_X/Y on the cursor
+                // plane. Best-effort: drivers without the cap accept it as a no-op (they expose no
+                // hotspot properties, so nothing downstream sets them). Must precede
+                // `AtomicDrmDevice::new`, which enumerates plane properties: the kernel only exposes
+                // HOTSPOT_X/Y once this cap is set.
+                let _ = fd.set_client_capability(ClientCapability::CursorPlaneHotspot, true);
                 DrmDeviceInternal::Atomic(AtomicDrmDevice::new(fd, active, disable_connectors)?)
             } else {
                 info!("Falling back to LegacyDrmDevice");

@@ -459,6 +459,9 @@ struct PlaneProperties {
     pub transform: Transform,
     pub alpha: f32,
     pub format: DrmFormat,
+    /// Cursor click point within the plane buffer, in physical pixels. `Some` only for a cursor
+    /// plane on a para-virtualized driver; written to the HOTSPOT_X/Y plane properties.
+    pub hotspot: Option<Point<i32, Physical>>,
 }
 
 impl PlaneProperties {
@@ -469,6 +472,7 @@ impl PlaneProperties {
             && self.transform == other.transform
             && self.alpha == other.alpha
             && self.format == other.format
+            && self.hotspot == other.hotspot
     }
 }
 
@@ -819,6 +823,7 @@ impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
                         .sync
                         .as_ref()
                         .and_then(|(_, fence)| fence.as_ref().map(|fence| fence.as_fd())),
+                    hotspot: config.properties.hotspot,
                 }),
             })
     }
@@ -1075,6 +1080,11 @@ where
 
     cursor_size: Size<i32, Physical>,
     cursor_state: Option<CursorState<G>>,
+    // Hotspot of the current cursor image, in physical pixels, as reported by the caller via
+    // [`DrmCompositor::set_cursor_hotspot`]. Written to the cursor plane's HOTSPOT_X/Y properties
+    // on para-virtualized drivers so the host can treat our cursor plane as its pointer (see the
+    // `CursorPlaneHotspot` client cap in `backend::drm::device`).
+    cursor_hotspot: Point<i32, Physical>,
 
     element_states: IndexMap<Id, ElementState<<F as ExportFramebuffer<A::Buffer>>::Framebuffer>>,
     previous_element_states: IndexMap<Id, ElementState<<F as ExportFramebuffer<A::Buffer>>::Framebuffer>>,
@@ -1257,6 +1267,7 @@ where
                         framebuffer_exporter,
                         cursor_size,
                         cursor_state,
+                        cursor_hotspot: Point::default(),
                         surface,
                         damage_tracker,
                         output_mode_source,
@@ -1439,6 +1450,7 @@ where
             framebuffer_exporter,
             cursor_size,
             cursor_state,
+            cursor_hotspot: Point::default(),
             surface,
             damage_tracker,
             output_mode_source,
@@ -1561,6 +1573,7 @@ where
                     transform: Transform::Normal,
                     alpha: 1.0,
                     format: buffer.format(),
+                    hotspot: None,
                 },
                 buffer: DrmScanoutBuffer {
                     buffer: ScanoutBuffer::Swapchain(Arc::new(buffer)),
@@ -1827,6 +1840,7 @@ where
                     transform: Transform::Normal,
                     alpha: 1.0,
                     format: primary_plane_buffer.format(),
+                    hotspot: None,
                 },
                 buffer: DrmScanoutBuffer {
                     buffer: ScanoutBuffer::Swapchain(Arc::new(primary_plane_buffer)),
@@ -2749,6 +2763,18 @@ where
         self.debug_flags
     }
 
+    /// Set the hotspot (click point) of the current cursor image, in physical pixels relative to
+    /// the top-left of the cursor.
+    ///
+    /// On para-virtualized drivers (virtio-gpu, qxl, vmwgfx) this is written to the cursor plane's
+    /// `HOTSPOT_X`/`HOTSPOT_Y` properties so the host composites our cursor plane as its own pointer
+    /// instead of drawing a second, redundant host cursor. Has no effect on drivers that don't
+    /// expose those properties. Call before [`DrmCompositor::render_frame`] whenever the cursor
+    /// image changes; the value is latched and reused until changed.
+    pub fn set_cursor_hotspot(&mut self, hotspot: impl Into<Point<i32, Physical>>) {
+        self.cursor_hotspot = hotspot.into();
+    }
+
     /// Returns a reference to the underlying drm surface
     pub fn surface(&self) -> &DrmSurface {
         &self.surface
@@ -3026,6 +3052,11 @@ where
         if !frame_flags.contains(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT) {
             return None;
         }
+
+        // Copy out before borrowing `self.cursor_state` mutably below. Written to HOTSPOT_X/Y in
+        // the plane config so para-virtualized hosts align our cursor plane to their pointer.
+        // NOTE: not adjusted for `output_transform`; correct for the common unrotated case.
+        let cursor_hotspot = self.cursor_hotspot;
 
         let Some(cursor_state) = self.cursor_state.as_mut() else {
             trace!("no cursor state, skipping cursor rendering");
@@ -3368,6 +3399,7 @@ where
                 alpha: 1.0,
                 transform: Transform::Normal,
                 format: framebuffer.format(),
+                hotspot: Some(cursor_hotspot),
             },
             buffer: DrmScanoutBuffer {
                 buffer: ScanoutBuffer::Cursor(Arc::new(cursor_buffer)),
@@ -3391,6 +3423,7 @@ where
                             && other.properties.alpha == config.properties.alpha
                             && other.properties.transform == config.properties.transform
                             && other.properties.format == config.properties.format
+                            && other.properties.hotspot == config.properties.hotspot
                     })
                     .unwrap_or(false)
             })
@@ -3561,6 +3594,7 @@ where
             alpha,
             transform,
             format: fb.format(),
+            hotspot: None,
         };
         let buffer: DrmScanoutBuffer<
             <A as Allocator>::Buffer,
