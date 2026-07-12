@@ -3055,7 +3055,8 @@ where
 
         // Copy out before borrowing `self.cursor_state` mutably below. Written to HOTSPOT_X/Y in
         // the plane config so para-virtualized hosts align our cursor plane to their pointer.
-        // NOTE: not adjusted for `output_transform`; correct for the common unrotated case.
+        // The caller reports it in the cursor image's own (unrotated) space; it is rotated into
+        // the cursor plane buffer's space below, once `cursor_plane_size` is known.
         let cursor_hotspot = self.cursor_hotspot;
 
         let Some(cursor_state) = self.cursor_state.as_mut() else {
@@ -3399,7 +3400,13 @@ where
                 alpha: 1.0,
                 transform: Transform::Normal,
                 format: framebuffer.format(),
-                hotspot: Some(cursor_hotspot),
+                // The cursor image is rendered into the plane buffer with `output_transform`
+                // (see the copy/pixman paths above), so the hotspot — a fixed point on that
+                // image — must be rotated the same way to land at the click point in buffer
+                // space. Rotate it within the `cursor_plane_size` box the buffer is rendered
+                // into; the box-offset terms cancel against `cursor_plane_location` so the
+                // host places the click point exactly at the pointer. Identity when unrotated.
+                hotspot: Some(output_transform.transform_point_in(cursor_hotspot, &cursor_plane_size)),
             },
             buffer: DrmScanoutBuffer {
                 buffer: ScanoutBuffer::Cursor(Arc::new(cursor_buffer)),
