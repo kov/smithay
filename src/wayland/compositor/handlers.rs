@@ -211,6 +211,13 @@ where
                 });
             }
             wl_surface::Request::Damage { x, y, width, height } => {
+                // A negative extent is an empty rectangle; ignore it rather than feeding it to
+                // `Size`, whose `debug_assert!` would abort the compositor from inside this
+                // libwayland callback. Same guard as `DamageBuffer` below.
+                if width < 0 || height < 0 {
+                    return;
+                }
+
                 let client_scale = state.client_compositor_state(client).client_scale();
                 PrivateSurfaceData::with_states(surface, |states| {
                     states
@@ -396,21 +403,34 @@ where
         let mut guard = data.inner.lock().unwrap();
         let client_scale = state.client_compositor_state(client).client_scale();
 
+        let rect = |x, y, width: i32, height: i32| {
+            Rectangle::<i32, Client>::new((x, y).into(), (width, height).into())
+                .to_f64()
+                .to_logical(client_scale)
+                .to_i32_round()
+        };
+
         match request {
-            wl_region::Request::Add { x, y, width, height } => guard.rects.push((
-                RectangleKind::Add,
-                Rectangle::<i32, Client>::new((x, y).into(), (width, height).into())
-                    .to_f64()
-                    .to_logical(client_scale)
-                    .to_i32_round(),
-            )),
-            wl_region::Request::Subtract { x, y, width, height } => guard.rects.push((
-                RectangleKind::Subtract,
-                Rectangle::<i32, Client>::new((x, y).into(), (width, height).into())
-                    .to_f64()
-                    .to_logical(client_scale)
-                    .to_i32_round(),
-            )),
+            wl_region::Request::Add { x, y, width, height } => {
+                // A negative extent is an empty rectangle, and adding one is a no-op; ignore it
+                // rather than feeding it to `Size`, whose `debug_assert!` would abort the
+                // compositor from inside this libwayland callback. The protocol does not forbid a
+                // negative extent and clients do send one (Firefox, while resizing), so this is
+                // reachable by any client. Same guard as `wl_surface.damage`.
+                if width < 0 || height < 0 {
+                    return;
+                }
+                guard.rects.push((RectangleKind::Add, rect(x, y, width, height)))
+            }
+            wl_region::Request::Subtract { x, y, width, height } => {
+                // Likewise: subtracting an empty rectangle is a no-op.
+                if width < 0 || height < 0 {
+                    return;
+                }
+                guard
+                    .rects
+                    .push((RectangleKind::Subtract, rect(x, y, width, height)))
+            }
             wl_region::Request::Destroy => {
                 // all is handled by our destructor
             }
