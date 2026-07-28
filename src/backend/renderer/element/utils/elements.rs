@@ -49,8 +49,16 @@ impl<E: Element> Element for RescaleRenderElement<E> {
         let mut element_geometry = self.element.geometry(scale);
         // First we make the element relative to the origin
         element_geometry.loc -= self.origin;
-        // Then we scale it by our scale
-        element_geometry = element_geometry.to_f64().upscale(self.scale).to_i32_round();
+        // Then we scale it by our scale. Round the *extremities*, not the location and the
+        // size independently: with independent rounding the far edge is
+        // `round(loc * scale) + round(size * scale)`, which is not monotone in the scale, so an
+        // animated rescale makes that edge flip back and forth by a pixel between frames even
+        // while everything around it holds still.
+        let scaled = element_geometry.to_f64().upscale(self.scale);
+        element_geometry = Rectangle::from_extremities(
+            scaled.loc.to_i32_round(),
+            (scaled.loc + scaled.size).to_i32_round(),
+        );
         // At last we move it back to the origin
         element_geometry.loc += self.origin;
         element_geometry
@@ -76,7 +84,20 @@ impl<E: Element> Element for RescaleRenderElement<E> {
         self.element
             .opaque_regions(scale)
             .into_iter()
-            .map(|rect| rect.to_f64().upscale(self.scale).to_i32_round())
+            // An opaque region is a promise that nothing below shows through, so it must round
+            // *inward*: rounding to the nearest can claim up to half a pixel the element does not
+            // actually paint, and whatever is behind that row is then culled — a rescale that
+            // animates makes such a row appear and disappear from frame to frame.
+            .filter_map(|rect| {
+                let scaled = rect.to_f64().upscale(self.scale);
+                let topleft = scaled.loc.to_i32_ceil::<i32>();
+                let bottomright = (scaled.loc + scaled.size).to_i32_floor::<i32>();
+                // Rounding inward can empty a region that is thinner than a pixel (a heavily
+                // downscaled thumbnail, the tail of a closing window). Drop it rather than build
+                // a negative-sized rectangle, which `Rectangle::from_extremities` asserts on.
+                (bottomright.x > topleft.x && bottomright.y > topleft.y)
+                    .then(|| Rectangle::from_extremities(topleft, bottomright))
+            })
             .collect::<OpaqueRegions<_, _>>()
     }
 
