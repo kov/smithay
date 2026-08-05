@@ -59,6 +59,8 @@ use wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, 
 
 use crate::input::{Seat, SeatHandler};
 
+pub use text_input_handle::InternalInputMethod;
+pub use text_input_handle::TextInputEvent;
 pub use text_input_handle::TextInputHandle;
 pub use text_input_handle::TextInputUserData;
 
@@ -160,7 +162,9 @@ where
                     },
                 );
                 handle.add_instance(&instance);
-                if input_method_handle.has_instance() {
+                // A compositor-internal input method counts too; see
+                // `TextInputHandle::set_internal_input_method`.
+                if input_method_handle.has_instance() || handle.has_internal_input_method() {
                     handle.enter();
                 }
             }

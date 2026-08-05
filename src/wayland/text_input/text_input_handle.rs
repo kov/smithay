@@ -14,11 +14,71 @@ use crate::wayland::input_method::InputMethodHandle;
 
 use super::TextInputManagerState;
 
-#[derive(Default, Debug)]
+/// What a `zwp_text_input_v3` client asked for, as plain data.
+///
+/// Emitted only to a compositor-internal input method registered with
+/// [`TextInputHandle::set_internal_input_method`]. A Wayland `zwp_input_method_v2` client gets
+/// the same information through its own protocol objects instead; both are driven from the same
+/// place so the two cannot drift.
+///
+/// These arrive in the order the client's atomic `commit` applied them, followed by
+/// [`TextInputEvent::Done`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum TextInputEvent {
+    /// The client enabled text input on the focused surface. The surface is
+    /// [`TextInputHandle::focus`].
+    Enabled,
+    /// The client disabled text input. No further state applies until the next `Enabled`.
+    Disabled,
+    /// Text around the cursor. `cursor` and `anchor` are **byte** offsets into `text`.
+    SurroundingText {
+        /// The surrounding text itself.
+        text: String,
+        /// Byte offset of the cursor within `text`.
+        cursor: u32,
+        /// Byte offset of the selection anchor within `text`.
+        anchor: u32,
+    },
+    /// Why the surrounding text changed.
+    TextChangeCause(ChangeCause),
+    /// What kind of text the client expects.
+    ContentType {
+        /// Behavior hints.
+        hint: ContentHint,
+        /// The purpose of the field.
+        purpose: ContentPurpose,
+    },
+    /// Where the cursor is, in surface-local coordinates — where a candidate popup goes.
+    CursorRectangle(Rectangle<i32, Logical>),
+    /// End of one atomic batch. Everything since the previous `Done` applies together.
+    Done,
+}
+
+/// A compositor-internal input method: somewhere to hand [`TextInputEvent`]s.
+///
+/// Deliberately a plain callback rather than a trait method taking `&mut D`. An internal input
+/// method is nearly always talking to something off-thread (IBus over D-Bus, say), so the sink
+/// is a channel send; requiring compositor state here would buy nothing and would put a trait
+/// bound on every `Dispatch` impl in the tree.
+pub type InternalInputMethod = Arc<dyn Fn(TextInputEvent) + Send + Sync>;
+
+#[derive(Default)]
 pub(crate) struct TextInput {
     instances: Vec<Instance>,
     focus: Option<WlSurface>,
     active_text_input_id: Option<ObjectId>,
+    internal_im: Option<InternalInputMethod>,
+}
+
+impl std::fmt::Debug for TextInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TextInput")
+            .field("instances", &self.instances)
+            .field("focus", &self.focus)
+            .field("active_text_input_id", &self.active_text_input_id)
+            .field("internal_im", &self.internal_im.is_some())
+            .finish()
+    }
 }
 
 impl TextInput {
@@ -89,6 +149,30 @@ impl TextInputHandle {
         {
             instance.serial += 1
         }
+    }
+
+    /// Register a compositor-internal input method, or clear it with `None`.
+    ///
+    /// Without one, and without a `zwp_input_method_v2` client, every text-input request is
+    /// discarded — the client is told nothing is listening and its own composition (dead keys,
+    /// Compose) is the only thing that runs. Registering here makes the compositor the input
+    /// method: it starts receiving [`TextInputEvent`]s and may drive the client with
+    /// [`Self::with_active_text_input`] and [`Self::done`].
+    pub fn set_internal_input_method(&self, sink: Option<InternalInputMethod>) {
+        self.inner.lock().unwrap().internal_im = sink;
+    }
+
+    /// Whether a compositor-internal input method is registered.
+    pub fn has_internal_input_method(&self) -> bool {
+        self.inner.lock().unwrap().internal_im.is_some()
+    }
+
+    /// The internal sink, cloned out so the caller can invoke it without holding the lock.
+    ///
+    /// Calling a compositor callback with the mutex held is a deadlock waiting to happen: the
+    /// sink is free to turn around and ask this same handle a question.
+    fn internal_sink(&self) -> Option<InternalInputMethod> {
+        self.inner.lock().unwrap().internal_im.clone()
     }
 
     /// Return the currently focused surface.
@@ -208,8 +292,12 @@ where
             data.handle.increment_serial(resource);
         }
 
+        // A compositor-internal input method counts as an IME: it is the thing that will turn
+        // these requests into preedit and commit strings.
+        let internal_im = data.handle.internal_sink();
+
         // Discard requests without any active input method instance.
-        if !data.input_method_handle.has_instance() {
+        if !data.input_method_handle.has_instance() && internal_im.is_none() {
             debug!("discarding text-input request without IME running");
             return;
         }
@@ -271,18 +359,28 @@ where
                     return;
                 }
 
+                // The internal input method is notified alongside the Wayland one throughout,
+                // rather than in a branch of its own, so the two can never fall out of step.
+                let notify = |event: TextInputEvent| {
+                    if let Some(sink) = internal_im.as_ref() {
+                        sink(event);
+                    }
+                };
+
                 match new_state.enable {
                     Some(true) => {
                         *active_text_input_id = Some(resource.id());
                         // Drop the guard before calling to other subsystem.
                         drop(guard);
                         data.input_method_handle.activate_input_method(state, &focus);
+                        notify(TextInputEvent::Enabled);
                     }
                     Some(false) => {
                         *active_text_input_id = None;
                         // Drop the guard before calling to other subsystem.
                         drop(guard);
                         data.input_method_handle.deactivate_input_method(state);
+                        notify(TextInputEvent::Disabled);
                         return;
                     }
                     None => {
@@ -297,28 +395,37 @@ where
                 }
 
                 if let Some((text, cursor, anchor)) = new_state.surrounding_text.take() {
+                    notify(TextInputEvent::SurroundingText {
+                        text: text.clone(),
+                        cursor,
+                        anchor,
+                    });
                     data.input_method_handle.with_instance(move |input_method| {
                         input_method.object.surrounding_text(text, cursor, anchor)
                     });
                 }
 
                 if let Some(cause) = new_state.text_change_cause.take() {
+                    notify(TextInputEvent::TextChangeCause(cause));
                     data.input_method_handle.with_instance(move |input_method| {
                         input_method.object.text_change_cause(cause);
                     });
                 }
 
                 if let Some((hint, purpose)) = new_state.content_type.take() {
+                    notify(TextInputEvent::ContentType { hint, purpose });
                     data.input_method_handle.with_instance(move |input_method| {
                         input_method.object.content_type(hint, purpose);
                     });
                 }
 
                 if let Some(rect) = new_state.cursor_rectangle.take() {
+                    notify(TextInputEvent::CursorRectangle(rect));
                     data.input_method_handle
                         .set_text_input_rectangle::<D>(state, rect);
                 }
 
+                notify(TextInputEvent::Done);
                 data.input_method_handle.with_instance(|input_method| {
                     input_method.done();
                 });

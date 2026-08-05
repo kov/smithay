@@ -252,8 +252,11 @@ pub(crate) fn enter_internal<D: SeatHandler + 'static>(
     // text-input global bound due to clients doing lazy global binding.
     text_input.set_focus(Some(surface.clone()));
 
-    // Only notify on `enter` once we have an actual IME.
-    if input_method.has_instance() {
+    // Only notify on `enter` once we have an actual IME — a Wayland one, or the compositor
+    // acting as one. Without the `enter` the client will never send `enable`, so an internal
+    // input method that is not counted here is an input method that is never asked to do
+    // anything.
+    if input_method.has_instance() || text_input.has_internal_input_method() {
         text_input.enter();
     }
 }
@@ -280,6 +283,10 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for WlSurface {
 
         if input_method.has_instance() {
             input_method.deactivate_input_method(state);
+        }
+
+        // Mirrors the `enter` gate above: whoever was told `enter` must be told `leave`.
+        if input_method.has_instance() || text_input.has_internal_input_method() {
             text_input.leave();
         }
 
