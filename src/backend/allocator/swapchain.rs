@@ -241,12 +241,23 @@ where
     ///
     /// Resetting the buffer age will discard all damage information and force a
     /// full redraw for the next frame.
+    ///
+    /// Buffers are kept. Age is the *claim* about a buffer's contents, not the contents
+    /// themselves, and 0 ("unknown, redraw everything") is the conservative claim — the full redraw
+    /// it asks for overwrites whatever is in there. Dropping the allocation as well would be a much
+    /// larger operation than the caller asked for; [`reset_buffers`](Self::reset_buffers) is how
+    /// you say that.
     pub fn reset_buffer_ages(&mut self) {
-        for slot in &mut self.slots {
-            match Arc::get_mut(slot) {
-                Some(slot) => slot.age = AtomicU8::new(0),
-                None => *slot = Default::default(),
-            }
+        // Through the `Arc`, not `Arc::get_mut`: a slot that is presented or otherwise in flight is
+        // shared, and `get_mut` would fail on exactly those. This method used to answer that failure
+        // by *replacing* the slot with a default one, which threw away the buffer and the userdata
+        // — including the `Dmabuf` that `Slot::export` caches there. A caller resetting ages every
+        // frame (to force full-damage rendering) therefore reallocated and re-exported its whole
+        // swapchain every frame. With 4K buffers on a virtualized GPU that was ~3.9 GB/s of
+        // allocation handed to the host, which killed the VM. `age` is an `AtomicU8` precisely so
+        // it can be set through a shared handle.
+        for slot in &self.slots {
+            slot.age.store(0, Ordering::SeqCst);
         }
     }
 
