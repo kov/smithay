@@ -216,10 +216,20 @@ pub(crate) fn enter_internal<D: SeatHandler + 'static>(
         kbd.enter(serial.into(), surface, serialized_keys.clone())
     });
 
-    let seat_clone = seat.clone();
+    // Weak, deliberately. This hook lives in the surface's own state, and the seat's keyboard
+    // holds the focused surface (`KbdInternal::focus`) — so a strong capture here closes a
+    // reference cycle between the two. `leave` breaks it by removing the hook, but a compositor
+    // torn down while a surface is still focused never gets there, and the whole cycle is
+    // orphaned: the seat, its keymap fd, the xkb context and keymap, and all of the surface's
+    // state. Nothing below needs the seat kept alive; if it is gone, so are the keyboards this
+    // would have notified. (`FocusDestroyHook` alongside already stores a `WeakSeat`.)
+    let weak_seat = seat.downgrade();
     let hook_id = add_destruction_hook::<D, _>(surface, move |_, surface| {
+        let Some(seat) = weak_seat.upgrade() else {
+            return;
+        };
         if let Some(client) = surface.client() {
-            let keyboard = seat_clone.get_keyboard().unwrap();
+            let keyboard = seat.get_keyboard().unwrap();
             let inner = keyboard.arc.known_kbds.lock().unwrap();
             for kbd in &*inner {
                 let Ok(kbd) = kbd.upgrade() else {
