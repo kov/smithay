@@ -148,6 +148,38 @@ impl Cacheable for SurfaceAttributes {
     }
 }
 
+/// Build a `wl_surface` for `client` without a client-side connection.
+///
+/// The real path is `wl_compositor.create_surface`, which needs a client that can send requests —
+/// more machinery than a unit test wants, and it would pull `wayland-client` in as a dev
+/// dependency. `SurfaceUserData`'s fields are private to this module, so a test anywhere else in
+/// the crate cannot assemble one itself; hence a constructor here rather than at the call site.
+///
+/// The surface is otherwise the real thing: same user data, same `PrivateSurfaceData::init`.
+#[cfg(test)]
+pub(crate) fn create_surface_for_test<D>(
+    client: &wayland_server::Client,
+    dh: &DisplayHandle,
+    version: u32,
+) -> WlSurface
+where
+    D: Dispatch<WlSurface, SurfaceUserData> + 'static,
+{
+    let surface = client
+        .create_resource::<WlSurface, SurfaceUserData, D>(
+            dh,
+            version,
+            SurfaceUserData {
+                inner: PrivateSurfaceData::new(),
+                alive_tracker: Default::default(),
+                user_state_type: (std::any::TypeId::of::<D>(), std::any::type_name::<D>()),
+            },
+        )
+        .expect("the client is alive, so it can hold a resource");
+    PrivateSurfaceData::init(&surface);
+    surface
+}
+
 /// User data for WlSurface
 #[derive(Debug)]
 pub struct SurfaceUserData {

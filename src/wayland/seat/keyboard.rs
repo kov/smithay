@@ -356,3 +356,124 @@ impl TryFrom<WlKeyState> for KeyState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use wayland_server::backend::ClientData;
+    use wayland_server::{Display, protocol::wl_surface::WlSurface};
+
+    use crate::input::{Seat, SeatHandler, SeatState};
+    use crate::utils::SERIAL_COUNTER;
+    use crate::wayland::compositor::{
+        CompositorClientState, CompositorHandler, CompositorState, create_surface_for_test,
+    };
+
+    struct TestState {
+        seat_state: SeatState<Self>,
+        compositor_state: CompositorState,
+    }
+
+    impl SeatHandler for TestState {
+        type KeyboardFocus = WlSurface;
+        type PointerFocus = WlSurface;
+        type TouchFocus = WlSurface;
+
+        fn seat_state(&mut self) -> &mut SeatState<Self> {
+            &mut self.seat_state
+        }
+    }
+    crate::delegate_seat!(TestState);
+
+    #[derive(Default)]
+    struct TestClientData {
+        compositor_state: CompositorClientState,
+    }
+    impl ClientData for TestClientData {}
+
+    impl CompositorHandler for TestState {
+        fn compositor_state(&mut self) -> &mut CompositorState {
+            &mut self.compositor_state
+        }
+
+        fn client_compositor_state<'a>(
+            &self,
+            client: &'a wayland_server::Client,
+        ) -> &'a CompositorClientState {
+            &client.get_data::<TestClientData>().unwrap().compositor_state
+        }
+
+        fn commit(&mut self, _surface: &WlSurface) {}
+    }
+    crate::delegate_compositor!(TestState);
+
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A surface that still has keyboard focus must not keep the seat alive.
+    ///
+    /// `enter_internal` installs a destruction hook on the focused surface, and the hook lives in
+    /// that surface's own state — while the keyboard holds the focused surface in
+    /// `KbdInternal::focus`. Capture the seat strongly there and the two reference each other.
+    /// `leave` removes the hook, so a running compositor never notices; one dropped while a
+    /// surface still has focus orphans the whole cycle, taking the xkb context, the compiled
+    /// keymap and the keymap's memfd with it. A compositor per test multiplies that into running
+    /// out of file descriptors.
+    ///
+    /// The surface's own state legitimately outlives this teardown (dropping a `Display` cold
+    /// never runs `ObjectData::destroyed`, so `PrivateSurfaceData::cleanup` never gets to break
+    /// the surface's own self-reference), which is exactly why this asserts on the *seat* and not
+    /// on the surface: with a weak capture the leaked surface state holds nothing that keeps the
+    /// seat alive.
+    #[test]
+    fn a_focused_surface_does_not_keep_the_seat_alive() {
+        let dropped = Arc::new(AtomicBool::new(false));
+
+        let display = Display::<TestState>::new().unwrap();
+        let mut dh = display.handle();
+        let mut state = TestState {
+            seat_state: SeatState::new(),
+            compositor_state: CompositorState::new::<TestState>(&dh),
+        };
+
+        let mut seat: Seat<TestState> = state.seat_state.new_wl_seat(&dh, "seat-0");
+        let keyboard = seat
+            .add_keyboard(Default::default(), 200, 25)
+            .expect("a default xkb keymap should compile");
+
+        // The sentinel lives in the seat's own user data, so it drops exactly when the seat does.
+        seat.user_data().insert_if_missing(|| DropFlag(dropped.clone()));
+
+        let (sock, _peer) = UnixStream::pair().unwrap();
+        let client = dh
+            .insert_client(sock, Arc::new(TestClientData::default()))
+            .unwrap();
+        let surface = create_surface_for_test::<TestState>(&client, &dh, 6);
+
+        keyboard.set_focus(&mut state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+
+        // Tear down without clearing focus first — the case a compositor exiting hits.
+        drop(surface);
+        drop(keyboard);
+        drop(seat);
+        drop(client);
+        drop(state);
+        drop(display);
+        // The `wl_seat` global's user data holds the seat too, and globals are torn down with the
+        // backend — which outlives the `Display` for as long as any handle to it does.
+        drop(dh);
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the seat outlived everything that should own it: the focused surface's destruction \
+             hook is still holding it, and with it the xkb context, the keymap and its memfd"
+        );
+    }
+}

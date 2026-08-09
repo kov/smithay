@@ -116,6 +116,8 @@ use std::sync::atomic::Ordering;
 use std::{any::Any, sync::Mutex};
 
 pub use self::cache::{Cacheable, CachedState, MultiCache};
+#[cfg(test)]
+pub(crate) use self::handlers::create_surface_for_test;
 pub use self::handlers::{RegionUserData, SubsurfaceCachedState, SubsurfaceUserData, SurfaceUserData};
 use self::transaction::TransactionQueue;
 pub use self::transaction::{Barrier, Blocker, BlockerState};
