@@ -154,7 +154,7 @@ use crate::{
         allocator::{
             Allocator, Buffer, Slot, Swapchain,
             dmabuf::{AsDmabuf, Dmabuf},
-            format::{get_opaque, has_alpha},
+            format::{FormatSet, get_opaque, has_alpha},
             gbm::{GbmAllocator, GbmBuffer, GbmBufferFlags, GbmDevice},
         },
         drm::{DrmError, PlaneDamageClips, plane_has_property},
@@ -944,6 +944,33 @@ impl From<&PlaneInfo> for PlaneAssignment {
             type_: value.type_,
         }
     }
+}
+
+/// Whether a plane advertising `plane_formats` can scan out a buffer in `format`.
+///
+/// Normally this is plain set membership. The exception is a plane whose every entry carries
+/// [`DrmModifier::Invalid`], which is what a driver without `DRM_CAP_ADDFB2_MODIFIERS` (and so
+/// without an `IN_FORMATS` blob) looks like: `drm::planes` has nothing to read the real modifiers
+/// from and synthesizes one implicit entry per advertised fourcc.
+///
+/// On such a plane `Invalid` is not a layout constraint, it is the *absence of information*. The
+/// driver has exactly one implicit layout per fourcc and cannot be told about any other — the
+/// framebuffer is added without `DRM_MODE_FB_MODIFIERS` because the ioctl rejects the flag
+/// outright. So the modifier carries nothing to match against, and only the fourcc is a real
+/// requirement. Comparing modifiers there rejects *every* buffer, including ones the plane would
+/// display perfectly.
+///
+/// This is the same trade [`DrmCompositor::find_supported_format`] already makes when it forces
+/// `Invalid` for the primary swapchain buffer ("we cannot be sure"), applied to element promotion
+/// so a client buffer is not the one thing excluded. As there, a plane that turns out to want a
+/// layout the buffer does not have fails the atomic test and falls back to compositing.
+fn plane_supports_format(plane_formats: &FormatSet, format: &DrmFormat) -> bool {
+    if plane_formats.contains(format) {
+        return true;
+    }
+
+    let implicit_only = plane_formats.iter().all(|f| f.modifier == DrmModifier::Invalid);
+    implicit_only && plane_formats.iter().any(|f| f.code == format.code)
 }
 
 struct PendingFrame<A: Allocator, F: ExportFramebuffer<<A as Allocator>::Buffer>, U> {
@@ -3975,7 +4002,7 @@ where
             element_id, plane.handle, plane.zpos, &element_config.buffer.fb, element_config.geometry
         );
 
-        if !plane.formats.contains(&element_config.properties.format) {
+        if !plane_supports_format(&plane.formats, &element_config.properties.format) {
             trace!(
                 "skipping direct scan-out on {:?} with zpos {:?} for element {:?}, format {:?} not supported",
                 plane.handle, plane.zpos, element_id, element_config.properties.format,
@@ -4465,4 +4492,83 @@ fn drm_compositor_is_send() {
 
     is_send::<DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>>(
     );
+}
+
+#[cfg(test)]
+mod format_tests {
+    use drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier};
+
+    use super::plane_supports_format;
+    use crate::backend::allocator::format::FormatSet;
+
+    fn fmt(code: DrmFourcc, modifier: DrmModifier) -> DrmFormat {
+        DrmFormat { code, modifier }
+    }
+
+    /// A plane that publishes an `IN_FORMATS` blob names real layouts, and a modifier it did not
+    /// name is a real mismatch.
+    #[test]
+    fn an_explicit_plane_still_matches_exactly() {
+        let plane = FormatSet::from_iter([
+            fmt(DrmFourcc::Xrgb8888, DrmModifier::Linear),
+            fmt(DrmFourcc::Argb8888, DrmModifier::Linear),
+        ]);
+
+        assert!(plane_supports_format(
+            &plane,
+            &fmt(DrmFourcc::Xrgb8888, DrmModifier::Linear)
+        ));
+        assert!(
+            !plane_supports_format(&plane, &fmt(DrmFourcc::Xrgb8888, DrmModifier::from(1u64))),
+            "an unnamed modifier on a plane that names its modifiers is a real mismatch",
+        );
+        assert!(
+            !plane_supports_format(&plane, &fmt(DrmFourcc::Xbgr8888, DrmModifier::Linear)),
+            "the fourcc is a requirement either way",
+        );
+    }
+
+    /// Without `DRM_CAP_ADDFB2_MODIFIERS` every entry is synthesized as `Invalid`; the modifier
+    /// then carries no information and only the fourcc constrains anything.
+    #[test]
+    fn an_implicit_plane_matches_on_the_fourcc_alone() {
+        let plane = FormatSet::from_iter([fmt(DrmFourcc::Xrgb8888, DrmModifier::Invalid)]);
+
+        assert!(plane_supports_format(
+            &plane,
+            &fmt(DrmFourcc::Xrgb8888, DrmModifier::Linear)
+        ));
+        assert!(plane_supports_format(
+            &plane,
+            &fmt(DrmFourcc::Xrgb8888, DrmModifier::Invalid)
+        ));
+        assert!(
+            !plane_supports_format(&plane, &fmt(DrmFourcc::Argb8888, DrmModifier::Linear)),
+            "a fourcc the plane never advertised is still refused",
+        );
+    }
+
+    /// A plane that names *some* modifiers is not an implicit plane, even if `Invalid` is among
+    /// them — there the driver did tell us what it wants.
+    #[test]
+    fn a_mixed_plane_is_not_treated_as_implicit() {
+        let plane = FormatSet::from_iter([
+            fmt(DrmFourcc::Xrgb8888, DrmModifier::Invalid),
+            fmt(DrmFourcc::Xrgb8888, DrmModifier::Linear),
+        ]);
+
+        assert!(!plane_supports_format(
+            &plane,
+            &fmt(DrmFourcc::Xrgb8888, DrmModifier::from(1u64))
+        ));
+    }
+
+    #[test]
+    fn an_empty_plane_supports_nothing() {
+        let plane = FormatSet::default();
+        assert!(!plane_supports_format(
+            &plane,
+            &fmt(DrmFourcc::Xrgb8888, DrmModifier::Linear)
+        ));
+    }
 }
