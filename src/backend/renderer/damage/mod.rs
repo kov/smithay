@@ -654,6 +654,38 @@ impl OutputDamageTracker {
             );
         }
 
+        // Add the damage for elements that lost an instance but are still here.
+        //
+        // We allow one element to appear several times in a frame, and decide per instance:
+        // an instance whose geometry matches any remembered one takes the cheap branch above and
+        // reports only the element's own damage, while one that matches none damages its new
+        // geometry *and* every remembered instance — so an instance that moves heals the rect it
+        // left. An instance that simply goes away heals nothing. The surviving instance matches,
+        // so the cheap branch runs; the id is still in the frame, so `elements_gone` skips it; and
+        // the rect the departed instance covered is left out of the damage, in this frame and
+        // every one after. A screen that cycles buffers then keeps those pixels in whichever
+        // buffer missed the repaint and shows them again every time it comes round.
+        //
+        // Only an id that had several instances can be in this state, and its own moved instances
+        // may already have damaged the list — a duplicate rect costs nothing next to a rect that
+        // is never asked for at all.
+        for (id, state) in self.last_state.elements.iter() {
+            if state.last_instances.len() < 2 {
+                continue;
+            }
+            let instances = render_elements.iter().filter(|e| e.id() == id).count();
+            // None left is `elements_gone`'s case, handled above.
+            if instances == 0 || instances >= state.last_instances.len() {
+                continue;
+            }
+            self.damage.extend(
+                state
+                    .last_instances
+                    .iter()
+                    .filter_map(|i| i.last_geometry.intersection(output_geo)),
+            );
+        }
+
         // damage regions no longer covered by opaque regions
         element_damage.clear();
         element_damage.extend_from_slice(&self.last_state.opaque_regions);
