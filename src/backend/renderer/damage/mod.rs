@@ -499,7 +499,6 @@ impl OutputDamageTracker {
         let mut element_damage = std::mem::take(&mut self.element_damage);
 
         let mut element_visible_area_workhouse = std::mem::take(&mut self.element_visible_area_workhouse);
-        let mut render_element_z_index = 0;
         for element in elements.iter() {
             let element_id = element.id();
             let element_loc = element.geometry(output_scale).loc;
@@ -534,53 +533,13 @@ impl OutputDamageTracker {
                 continue;
             }
 
-            let element_src = element.src();
-            let element_geometry = element.geometry(output_scale);
-            let element_transform = element.transform();
-            let element_alpha = element.alpha();
-            let element_last_state = self.last_state.elements.get(element.id());
             let element_is_framebuffer_effect = element.is_framebuffer_effect();
 
-            self.element_damage_index.push(self.damage.len());
-            if element_last_state
-                .map(|s| {
-                    !s.instance_matches(
-                        element_src,
-                        element_geometry,
-                        element_transform,
-                        element_alpha,
-                        render_element_z_index,
-                        element_is_framebuffer_effect,
-                    )
-                })
-                .unwrap_or(true)
-            {
-                if let Some(intersection) = element_geometry.intersection(output_geo) {
-                    self.damage.push(intersection);
-                }
-                if let Some(state) = element_last_state {
-                    self.damage.extend(
-                        state
-                            .last_instances
-                            .iter()
-                            .filter_map(|i| i.last_geometry.intersection(output_geo)),
-                    );
-                }
-            } else {
-                let element_output_damage = element
-                    .damage_since(
-                        output_scale,
-                        self.last_state.elements.get(element_id).map(|s| s.last_commit),
-                    )
-                    .into_iter()
-                    .map(|mut d| {
-                        d.loc += element_loc;
-                        d
-                    })
-                    .filter_map(|geo| geo.intersection(output_geo));
-                self.damage.extend(element_output_damage);
-            }
-
+            // The damage decision needs this element's z-index, and z-index is now counted from
+            // the *back* (see the second pass below), so it cannot be known until the number of
+            // elements that survive this cull is known. Everything the decision needs is derived
+            // from the element itself, and nothing it does feeds the cull or the opaque regions
+            // accumulated here, so it moves wholesale to a second walk.
             let element_opaque_regions_start_index = self.opaque_regions.len();
             let element_opaque_regions = element
                 .opaque_regions(output_scale)
@@ -595,7 +554,6 @@ impl OutputDamageTracker {
             self.opaque_regions_index
                 .push(element_opaque_regions_start_index..element_opaque_regions_end_index);
 
-            render_element_z_index += 1;
             render_elements.push(element);
 
             if let Some(state) = element_render_states.states.get_mut(element_id) {
@@ -624,6 +582,77 @@ impl OutputDamageTracker {
             &mut self.element_visible_area_workhouse,
             &mut element_visible_area_workhouse,
         );
+
+        // Second walk: decide each surviving element's damage, now that the total is known.
+        //
+        // **Z-index is counted from the back**, so the bottom-most element is 0. Counting from the
+        // front — which is the natural direction for the cull above, because occlusion is decided
+        // by what is in front — makes an element's z-index the number of elements drawn over it.
+        // The background is then numbered by the size of the entire scene: anything appearing
+        // anywhere in front of it renumbers it, `instance_matches` fails, and its whole geometry is
+        // damaged. For a full-output opaque background that is a full-output repaint caused by
+        // nothing having been redrawn.
+        //
+        // Numbering from the back does not remove that churn, it moves it onto the elements that
+        // are cheapest to damage: a cursor or a popup appearing at the very front now renumbers
+        // nothing, and the background stays matched. Note this trades one direction for the other
+        // rather than eliminating the problem — an element inserted *behind* something still
+        // renumbers it, and a *reorder* within the list renumbers everything it moved past in
+        // either scheme. The asymmetry is what makes the trade worth it: front-end churn is common
+        // (cursors, popups, overlays) and back-end elements are the expensive ones to repaint.
+        //
+        // The index into `element_damage_index` and `opaque_regions_index` stays the element's
+        // *position* in `render_elements`, which is unchanged and front-to-back; only the value
+        // compared and stored as `last_z_index` is reversed.
+        let shaded_count = render_elements.len();
+        for (position, element) in render_elements.iter().enumerate() {
+            let element_id = element.id();
+            let element_loc = element.geometry(output_scale).loc;
+            let element_src = element.src();
+            let element_geometry = element.geometry(output_scale);
+            let element_transform = element.transform();
+            let element_alpha = element.alpha();
+            let element_last_state = self.last_state.elements.get(element_id);
+            let element_is_framebuffer_effect = element.is_framebuffer_effect();
+            let element_z_index = shaded_count - 1 - position;
+
+            self.element_damage_index.push(self.damage.len());
+            if element_last_state
+                .map(|s| {
+                    !s.instance_matches(
+                        element_src,
+                        element_geometry,
+                        element_transform,
+                        element_alpha,
+                        element_z_index,
+                        element_is_framebuffer_effect,
+                    )
+                })
+                .unwrap_or(true)
+            {
+                if let Some(intersection) = element_geometry.intersection(output_geo) {
+                    self.damage.push(intersection);
+                }
+                if let Some(state) = element_last_state {
+                    self.damage.extend(
+                        state
+                            .last_instances
+                            .iter()
+                            .filter_map(|i| i.last_geometry.intersection(output_geo)),
+                    );
+                }
+            } else {
+                let element_output_damage = element
+                    .damage_since(output_scale, element_last_state.map(|s| s.last_commit))
+                    .into_iter()
+                    .map(|mut d| {
+                        d.loc += element_loc;
+                        d
+                    })
+                    .filter_map(|geo| geo.intersection(output_geo));
+                self.damage.extend(element_output_damage);
+            }
+        }
 
         let mut force_effect_redraw = false;
 
@@ -813,11 +842,15 @@ impl OutputDamageTracker {
         let mut new_elements_state = std::mem::take(&mut self.last_state.elements);
         new_elements_state.clear();
         new_elements_state.reserve(render_elements.len());
+        // Same back-counted z-index the second walk compared against, or the next frame would
+        // compare a back index to a front one and every element would mismatch, every frame.
+        let shaded_count = render_elements.len();
         let new_elements_state =
             render_elements
                 .iter()
                 .enumerate()
-                .fold(new_elements_state, |mut map, (z_index, elem)| {
+                .fold(new_elements_state, |mut map, (position, elem)| {
+                    let z_index = shaded_count - 1 - position;
                     let id = elem.id();
                     let elem_src = elem.src();
                     let elem_alpha = elem.alpha();
