@@ -15,12 +15,25 @@ pub(crate) struct SeatData<U: Clone + Sync + Send + 'static> {
     clipboard_selection_focus: Option<Client>,
     primary_selection: Option<OfferReplySource<U>>,
     primary_selection_focus: Option<Client>,
+    excluded_client: Option<Client>,
 }
 
 impl<U: Clone + Send + Sync + 'static> SeatData<U> {
     /// Create a new [`SeatData`] with empty selections and without focusing any client.
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// The client barred from taking part in selections, if any.
+    ///
+    /// See [`set_selection_excluded_client`](crate::wayland::selection::data_device::set_selection_excluded_client).
+    pub fn excluded_client(&self) -> Option<&Client> {
+        self.excluded_client.as_ref()
+    }
+
+    /// Bar `client` from taking part in selections, or lift the bar with `None`.
+    pub fn set_excluded_client(&mut self, client: Option<Client>) {
+        self.excluded_client = client;
     }
 
     pub fn retain_devices<F: FnMut(&SelectionDevice) -> bool>(&mut self, retain: F) {
@@ -139,10 +152,20 @@ impl<U: Clone + Send + Sync + 'static> SeatData<U> {
             ),
         };
 
+        let excluded = self.excluded_client.clone();
+
         for device in self
             .known_devices
             .iter()
             .filter(|&device| restrict_to.is_none_or(|r| r == device))
+            // An excluded client takes no part in selections at all, focused or not, and however
+            // it bound the device. Skipping it here covers the data-control devices too, which
+            // are otherwise deliberately focus-blind.
+            .filter(|&device| {
+                excluded
+                    .as_ref()
+                    .is_none_or(|excluded| dh.get_client(device.id()).is_ok_and(|c| &c != excluded))
+            })
             .filter(|&device| match device {
                 // NOTE: filter by actual type here to not get a missmpatches when using selections
                 // later on.
@@ -223,6 +246,7 @@ impl<U: Clone + Send + Sync + 'static> Default for SeatData<U> {
             clipboard_selection_focus: None,
             primary_selection: None,
             primary_selection_focus: None,
+            excluded_client: None,
         }
     }
 }

@@ -66,6 +66,14 @@ where
                     }
                 };
 
+                if seat_data.borrow().excluded_client() == Some(client) {
+                    debug!(
+                        client = ?client,
+                        "denying setting selection by an excluded client"
+                    );
+                    return;
+                }
+
                 // NOTE: While protocol states that selection shouldn't be used more than once,
                 // no-one enforces it, thus we have clients around that do so and crashing them
                 // doesn't worth it at this point.

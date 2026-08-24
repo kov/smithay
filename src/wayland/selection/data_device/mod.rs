@@ -622,6 +622,28 @@ where
     seat_data.borrow_mut().set_clipboard_focus::<D>(dh, client);
 }
 
+/// Bar a client from taking part in selections on this seat, or lift the bar with `None`.
+///
+/// An excluded client is never offered the selection — through `wl_data_device`,
+/// `zwp_primary_selection_device_v1` or either data-control protocol — and its attempts to set
+/// one are dropped, whether or not it holds keyboard focus. Drag-and-drop is untouched.
+///
+/// This exists for the compositor that bridges X11 selections itself: an Xwayland glue client
+/// that also bridges would fight it, re-exporting each selection back the way it came.
+#[instrument(name = "wayland_data_device", level = "debug", skip(seat, client), fields(seat = seat.name(), client = ?client.as_ref().map(|c| c.id())))]
+pub fn set_selection_excluded_client<D>(seat: &Seat<D>, client: Option<Client>)
+where
+    D: SeatHandler + DataDeviceHandler + 'static,
+{
+    seat.user_data()
+        .insert_if_missing(|| RefCell::new(SeatData::<D::SelectionUserData>::new()));
+    let seat_data = seat
+        .user_data()
+        .get::<RefCell<SeatData<D::SelectionUserData>>>()
+        .unwrap();
+    seat_data.borrow_mut().set_excluded_client(client);
+}
+
 /// Set a compositor-provided selection for this seat
 ///
 /// You need to provide the available mime types for this selection.
