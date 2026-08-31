@@ -747,6 +747,15 @@ impl OutputDamageTracker {
             force_effect_redraw = true;
         }
 
+        // A recapturing effect pushes its own geometry onto `self.damage` below, so the scene
+        // beneath it gets redrawn. Those pushes land past every recorded `element_damage_index`,
+        // which means every effect processed later -- that is, everything *behind* -- would see
+        // them and recapture too. That cascade is wrong: an effect in front recapturing does not
+        // change what an effect behind it samples, and anything that genuinely changed behind the
+        // rear effect already reaches it through its own index. So the trigger test only looks at
+        // damage that existed before this loop started.
+        let effect_damage_start = self.damage.len();
+
         // for backdrop elements check if anything below them changed and add full-damage, if it did.
         for (z_index, element) in render_elements
             .iter()
@@ -773,10 +782,8 @@ impl OutputDamageTracker {
 
             if element_state.needs_capture
                 || with_element_state.is_some_and(|state| state.needs_capture)
-                || self
-                    .damage
+                || self.damage[damage_index.min(effect_damage_start)..effect_damage_start]
                     .iter()
-                    .skip(damage_index)
                     .any(|d| d.overlaps(intersection))
             {
                 element_state.needs_capture = true;
