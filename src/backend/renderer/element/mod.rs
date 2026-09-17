@@ -566,6 +566,25 @@ pub trait Element {
     fn is_framebuffer_effect(&self) -> bool {
         false
     }
+    /// Extra inputs of this element's `draw` that belong to its *instance* identity.
+    ///
+    /// The damage tracker keys an instance on what it can see from the outside — src, geometry,
+    /// transform, alpha, z-index — and while that key still matches it only asks the element for
+    /// [`damage_since`](Element::damage_since). An element whose `draw` reads something the key
+    /// does not cover (a corner radius, an animated scale) therefore keeps drawing different
+    /// pixels while the tracker believes nothing about the instance moved, so an incrementally
+    /// repainted target keeps the older pixels for as long as the instance sits still. Fold those
+    /// inputs in here and a change damages the instance the way a move does.
+    ///
+    /// Fold continuous values by bit pattern (`f32::to_bits`) rather than rounding them: the
+    /// question is only whether anything changed, and a rounded key goes stale within its step.
+    ///
+    /// This exists because an element's `Id` is shared by every instance drawn from one buffer,
+    /// so per-element state cannot tell two simultaneous instances apart; the tracker's per-
+    /// instance state can.
+    fn draw_key(&self) -> u64 {
+        0
+    }
 }
 
 /// A single render element
@@ -669,6 +688,10 @@ where
 
     fn is_framebuffer_effect(&self) -> bool {
         (*self).is_framebuffer_effect()
+    }
+
+    fn draw_key(&self) -> u64 {
+        (*self).draw_key()
     }
 }
 
@@ -786,6 +809,10 @@ impl<E: Element> Element for NamespacedElement<E> {
 
     fn is_framebuffer_effect(&self) -> bool {
         self.inner.is_framebuffer_effect()
+    }
+
+    fn draw_key(&self) -> u64 {
+        self.inner.draw_key()
     }
 }
 
@@ -1107,6 +1134,19 @@ macro_rules! render_elements_internal {
                         #[$meta]
                     )*
                     Self::$body(x) => $crate::render_elements_internal!(@call is_framebuffer_effect; x)
+                ),*,
+                Self::_GenericCatcher(_) => unreachable!(),
+            }
+        }
+
+        fn draw_key(&self) -> u64 {
+            match self {
+                $(
+                    #[allow(unused_doc_comments)]
+                    $(
+                        #[$meta]
+                    )*
+                    Self::$body(x) => $crate::render_elements_internal!(@call draw_key; x)
                 ),*,
                 Self::_GenericCatcher(_) => unreachable!(),
             }
@@ -1799,6 +1839,10 @@ where
 
     fn is_framebuffer_effect(&self) -> bool {
         self.0.is_framebuffer_effect()
+    }
+
+    fn draw_key(&self) -> u64 {
+        self.0.draw_key()
     }
 }
 

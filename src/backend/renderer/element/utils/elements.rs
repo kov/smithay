@@ -112,6 +112,10 @@ impl<E: Element> Element for RescaleRenderElement<E> {
     fn is_framebuffer_effect(&self) -> bool {
         self.element.is_framebuffer_effect()
     }
+
+    fn draw_key(&self) -> u64 {
+        self.element.draw_key()
+    }
 }
 
 impl<R: Renderer, E: RenderElement<R>> RenderElement<R> for RescaleRenderElement<E> {
@@ -311,6 +315,10 @@ impl<E: Element> Element for CropRenderElement<E> {
     fn is_framebuffer_effect(&self) -> bool {
         self.element.is_framebuffer_effect()
     }
+
+    fn draw_key(&self) -> u64 {
+        self.element.draw_key()
+    }
 }
 
 impl<R: Renderer, E: RenderElement<R>> RenderElement<R> for CropRenderElement<E> {
@@ -427,6 +435,10 @@ impl<E: Element> Element for RelocateRenderElement<E> {
 
     fn is_framebuffer_effect(&self) -> bool {
         self.element.is_framebuffer_effect()
+    }
+
+    fn draw_key(&self) -> u64 {
+        self.element.draw_key()
     }
 }
 

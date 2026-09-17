@@ -132,6 +132,7 @@ struct ElementInstanceState {
     last_alpha: f32,
     last_z_index: usize,
     last_is_framebuffer_effect: bool,
+    last_draw_key: u64,
 }
 
 impl ElementInstanceState {
@@ -144,6 +145,7 @@ impl ElementInstanceState {
         alpha: f32,
         z_index: usize,
         is_framebuffer_effect: bool,
+        draw_key: u64,
     ) -> bool {
         self.last_src == src
             && self.last_geometry == geometry
@@ -151,6 +153,7 @@ impl ElementInstanceState {
             && self.last_alpha == alpha
             && self.last_z_index == z_index
             && self.last_is_framebuffer_effect == is_framebuffer_effect
+            && self.last_draw_key == draw_key
     }
 }
 
@@ -170,10 +173,19 @@ impl ElementState {
         alpha: f32,
         z_index: usize,
         is_framebuffer_effect: bool,
+        draw_key: u64,
     ) -> bool {
-        self.last_instances
-            .iter()
-            .any(|instance| instance.matches(src, geometry, transform, alpha, z_index, is_framebuffer_effect))
+        self.last_instances.iter().any(|instance| {
+            instance.matches(
+                src,
+                geometry,
+                transform,
+                alpha,
+                z_index,
+                is_framebuffer_effect,
+                draw_key,
+            )
+        })
     }
 }
 
@@ -614,6 +626,7 @@ impl OutputDamageTracker {
             let element_alpha = element.alpha();
             let element_last_state = self.last_state.elements.get(element_id);
             let element_is_framebuffer_effect = element.is_framebuffer_effect();
+            let element_draw_key = element.draw_key();
             let element_z_index = shaded_count - 1 - position;
 
             self.element_damage_index.push(self.damage.len());
@@ -626,6 +639,7 @@ impl OutputDamageTracker {
                         element_alpha,
                         element_z_index,
                         element_is_framebuffer_effect,
+                        element_draw_key,
                     )
                 })
                 .unwrap_or(true)
@@ -864,6 +878,7 @@ impl OutputDamageTracker {
                     let elem_geometry = elem.geometry(output_scale);
                     let elem_transform = elem.transform();
                     let element_is_framebuffer_effect = elem.is_framebuffer_effect();
+                    let elem_draw_key = elem.draw_key();
 
                     if let Some(state) = map.get_mut(id) {
                         state.last_instances.push(ElementInstanceState {
@@ -873,6 +888,7 @@ impl OutputDamageTracker {
                             last_alpha: elem_alpha,
                             last_z_index: z_index,
                             last_is_framebuffer_effect: element_is_framebuffer_effect,
+                            last_draw_key: elem_draw_key,
                         });
                     } else {
                         let current_commit = elem.current_commit();
@@ -887,6 +903,7 @@ impl OutputDamageTracker {
                                     last_alpha: elem_alpha,
                                     last_z_index: z_index,
                                     last_is_framebuffer_effect: element_is_framebuffer_effect,
+                                    last_draw_key: elem_draw_key,
                                 }],
                             },
                         );
