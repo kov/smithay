@@ -286,6 +286,22 @@ impl RendererSurfaceState {
         self.damage.snapshot()
     }
 
+    /// Damage part of the current buffer as a commit would, without a new buffer.
+    ///
+    /// For a renderer that finishes an import after the commit it belongs to — an upload
+    /// completed off the render thread, say — and has to get the surface repainted once its
+    /// texture holds the new pixels. The damage is clamped to the buffer, and non-empty damage
+    /// advances [`current_commit`](Self::current_commit) like any damaged commit, which is what
+    /// makes render elements built from this surface report it.
+    pub fn add_damage(&mut self, damage: impl IntoIterator<Item = Rectangle<i32, BufferCoord>>) {
+        let Some(size) = self.buffer_dimensions else {
+            return;
+        };
+        let bounds = Rectangle::from_size(size);
+        self.damage
+            .add(damage.into_iter().filter_map(|rect| rect.intersection(bounds)));
+    }
+
     /// Returns the logical size of the current attached buffer
     pub fn buffer_size(&self) -> Option<Size<i32, Logical>> {
         self.buffer_dimensions
